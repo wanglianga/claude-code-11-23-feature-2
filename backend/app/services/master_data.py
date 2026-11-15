@@ -83,7 +83,14 @@ def upsert_device_mapping(db: Session, d: DeviceMappingIn, mapping_version: int)
     for row in open_rows:
         row.effective_to = d.effective_from
     obj = DeviceMapping(**d.model_dump(), mapping_version=mapping_version)
-    db.add(obj); db.flush(); return obj
+    db.add(obj); db.flush()
+    # 设备资料变更：该设备全部待批准校正参数失效（诊断纪律）
+    from .diagnosis import invalidate_corrections_for_device
+    invalidate_corrections_for_device(
+        db, d.device_id,
+        f"设备映射变更（mapping_version={mapping_version}，{d.change_reason}），"
+        "待批准校正基于旧设备资料，失效")
+    return obj
 
 
 def upsert_allocation(db: Session, d: AllocationIn, mapping_version: int) -> PlotBatchAllocation:
@@ -134,6 +141,12 @@ def register_meter_change(db: Session, d: MeterChangeIn) -> MeterChange:
     status = "certified" if d.voucher_present else "missing_voucher"
     obj = MeterChange(**d.model_dump(), status=status)
     db.add(obj); db.flush()
+    # 设备资料变更：换表后原表校正参数不再适用，待批准校正失效
+    from .diagnosis import invalidate_corrections_for_device
+    invalidate_corrections_for_device(
+        db, d.device_id,
+        f"换表登记（{d.change_time.isoformat()}，{'有凭证' if d.voucher_present else '缺凭证'}），"
+        "待批准校正基于旧表特性，失效")
     if not d.voucher_present:
         db.add(QualityEvent(
             event_uid=f"qe_{uuid.uuid4().hex[:16]}",

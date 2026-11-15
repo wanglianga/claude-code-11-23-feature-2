@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import Base, engine
-from .routers import auth, contracts, facts, ingestion, master, metrics
+from .routers import auth, contracts, diagnosis, facts, ingestion, master, metrics
 
 # 导入模型以确保元数据注册
 from . import models  # noqa: F401
@@ -26,6 +26,7 @@ app.include_router(ingestion.router)
 app.include_router(master.router)
 app.include_router(facts.router)
 app.include_router(metrics.router)
+app.include_router(diagnosis.router)
 
 
 @app.on_event("startup")

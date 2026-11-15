@@ -21,7 +21,7 @@ PY
 python -c "from app.db import Base, engine; from app import models; Base.metadata.create_all(bind=engine)"
 
 if [ "${IRR_SEED:-true}" = "true" ]; then
-  echo "[entrypoint] 写入样例数据（迟到补传/换表缺证/渠道失衡/证据冲突场景）..."
+  echo "[entrypoint] 写入样例数据（迟到补传/换表缺证/渠道失衡/证据冲突 + 渗漏/表漂移/证据不足诊断场景）..."
   python -m scripts.seed || echo "[entrypoint] 种子已存在或写入失败，跳过"
 fi
 

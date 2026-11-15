@@ -25,6 +25,8 @@ def clean_db():
         conn.execute(text(
             "TRUNCATE TABLE metric_versions, recompute_runs, reconciliation_tasks, "
             "adjudications, quality_events, supply_facts, meter_changes, "
+            "correction_params, retest_reports, retest_plans, "
+            "diagnostic_hypotheses, diagnostic_runs, "
             "plot_batch_allocations, device_mappings, mapping_versions, "
             "rotation_batches, plots, meter_points, channels, "
             "manual_revisions, raw_messages, data_contracts RESTART IDENTITY CASCADE"))

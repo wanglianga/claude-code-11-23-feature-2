@@ -33,15 +33,20 @@ def raise_event(db: Session, rule_code: str, severity: str, detail: dict,
                 device_id=None, meter_point_code=None, channel_code=None,
                 interval_start=None, interval_end=None,
                 related_fact_ids=None, extra_key: str | None = None) -> QualityEvent:
-    """开放事件按 规则+自然键 幂等；已存在则直接返回。"""
+    """开放事件按 规则+设备+区间起点+去重键 幂等；已存在则直接返回。"""
     key = extra_key or rule_code
-    existing = db.scalar(select(QualityEvent).where(
+    stmt = select(QualityEvent).where(
         QualityEvent.rule_code == rule_code,
-        QualityEvent.device_id.isnot(None) if device_id else QualityEvent.device_id.is_(None),
         QualityEvent.interval_start == interval_start,
-        QualityEvent.status != "closed"))
-    if existing and existing.detail.get("dedup_key") == key and (
-            device_id is None or existing.device_id == device_id):
+        QualityEvent.status != "closed")
+    # 设备维度必须在查询内过滤：多台设备同一时刻触发同类事件时，
+    # 任意首条命中会导致跨设备误判重并产生重复事件
+    if device_id:
+        stmt = stmt.where(QualityEvent.device_id == device_id)
+    else:
+        stmt = stmt.where(QualityEvent.device_id.is_(None))
+    existing = db.scalar(stmt)
+    if existing and existing.detail.get("dedup_key") == key:
         return existing
     ev = QualityEvent(
         event_uid=_uid("qe"), rule_code=rule_code, severity=severity,
@@ -126,9 +131,11 @@ def check_channel_conservation(db: Session) -> list[ReconciliationTask]:
 
     超容差 => 对账任务并冻结父渠道损耗指标。只统计 confirmed；
     pending_verification/candidate 不计入可解释量，绝不以计划量补平。
+    已批准校正（adjustment 事实）计入核算口径：校正经批准即作用于核算。
     """
     from ..models import Channel, MeterPoint
-    facts = [f for f in _active_facts(db) if f.fact_kind in ("supply", "transfer")]
+    facts = [f for f in _active_facts(db)
+             if f.fact_kind in ("supply", "transfer", "adjustment")]
     point_role = {p.code: p.point_role for p in db.scalars(select(MeterPoint)).all()}
     parent = {c.code: c.parent_code for c in db.scalars(select(Channel)).all()}
     children: dict[str, list[str]] = {}

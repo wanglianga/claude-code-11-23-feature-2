@@ -76,6 +76,7 @@ def _metric_dict(m: MetricVersion) -> dict:
         "planned_volume": m.planned_volume,
         "confirmed_volume": m.confirmed_volume,
         "pending_volume": m.pending_volume,
+        "correction_volume": m.correction_volume,
         "loss_lower": m.loss_lower, "loss_upper": m.loss_upper,
         "missing_rate": m.missing_rate,
         "over_allocation_risk": m.over_allocation_risk,

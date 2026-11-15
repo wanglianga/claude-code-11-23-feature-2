@@ -83,7 +83,8 @@ def _diff_note(prev: MetricVersion | None, cur: dict) -> str:
         return "首次发布"
     parts = []
     for key, label in [("planned_volume", "计划水量"), ("confirmed_volume", "确认实灌量"),
-                       ("pending_volume", "待核实量"), ("missing_rate", "缺测率")]:
+                       ("pending_volume", "待核实量"), ("missing_rate", "缺测率"),
+                       ("correction_volume", "校正调整量")]:
         old, new = getattr(prev, key), cur[key]
         if old is None or abs((new or 0) - (old or 0)) > 1e-9:
             parts.append(f"{label}: {old} -> {new}")
@@ -117,6 +118,7 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
             "grain_type": grain_type, "grain_key": grain_key, "day": day,
             "batch_code": batch_code, "planned": 0.0, "confirmed": 0.0,
             "pending": 0.0, "candidate": 0.0, "upstream": 0.0, "downstream": 0.0,
+            "correction": 0.0,
             "devices": set(), "late": False, "fact_ids": [], "channels": set()})
         return b
 
@@ -141,6 +143,11 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
             if f.fact_kind == "plan":
                 b["planned"] += f.value
                 continue
+            if f.fact_kind == "adjustment":
+                # 已批准校正调整量：单列，不混入确认实灌（正式实灌与诊断校正分离）
+                if f.status == "confirmed":
+                    b["correction"] += f.value
+                continue
             if f.status == "confirmed":
                 b["confirmed"] += f.value
                 if point_role.get(f.meter_point_code) in ("head", "transfer"):
@@ -157,6 +164,23 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
                        note=note)
     db.add(run); db.flush()
 
+    # 渠道损耗口径：父渠道下游 = 自身下游点 + 各子渠道确认量（与守恒对账同一口径）
+    from ..models import Channel
+    children: dict[str, list[str]] = {}
+    for c in db.scalars(select(Channel)).all():
+        if c.parent_code:
+            children.setdefault(c.parent_code, []).append(c.code)
+
+    def child_sums(channel_key: str, day: datetime) -> tuple[float, float, float]:
+        conf = pend = corr = 0.0
+        for kid in children.get(channel_key, []):
+            kb = buckets.get(("channel", kid, day))
+            if kb:
+                conf += kb["confirmed"]
+                pend += kb["pending"]
+                corr += kb["correction"]
+        return conf, pend, corr
+
     versions: list[MetricVersion] = []
     for (grain_type, grain_key, day), b in sorted(buckets.items(),
                                                   key=lambda x: (x[0][2], x[0][0], x[0][1])):
@@ -172,9 +196,14 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
         loss_lower = loss_upper = None
         is_frozen = grain_type == "channel" and grain_key in frozen
         if grain_type == "channel" and b["upstream"] > 0 and not is_frozen:
-            point_loss = b["upstream"] - b["downstream"]
+            child_conf, child_pend, child_corr = child_sums(grain_key, day)
+            # 已批准校正计入核算口径：上游侧校正修正上游量，子渠道校正修正下游可解释量
+            upstream_corr = b["upstream"] + b["correction"]
+            downstream = b["downstream"] + child_conf + child_corr
+            total_pending = pending + child_pend
+            point_loss = upstream_corr - downstream
             loss_upper = round(max(point_loss, 0.0), 3)
-            loss_lower = round(max(point_loss - pending, 0.0), 3)
+            loss_lower = round(max(point_loss - total_pending, 0.0), 3)
 
         if is_frozen:
             status = "frozen"
@@ -186,7 +215,8 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
             status = "stable"
 
         cur = {"planned_volume": planned, "confirmed_volume": confirmed,
-               "pending_volume": pending, "missing_rate": missing, "status": status}
+               "pending_volume": pending, "missing_rate": missing, "status": status,
+               "correction_volume": round(b["correction"], 3)}
 
         prev = db.scalar(select(MetricVersion).where(
             MetricVersion.grain_type == grain_type,
@@ -199,7 +229,8 @@ def publish_metrics(db: Session, trigger: str = "scheduled",
             version_no=vno, metric_date=day, grain_type=grain_type,
             grain_key=grain_key, batch_code=b["batch_code"],
             planned_volume=planned, confirmed_volume=confirmed,
-            pending_volume=pending, loss_lower=loss_lower, loss_upper=loss_upper,
+            pending_volume=pending, correction_volume=round(b["correction"], 3),
+            loss_lower=loss_lower, loss_upper=loss_upper,
             missing_rate=missing, over_allocation_risk=risk,
             plan_completion_rate=completion, status=status,
             watermark=watermark, stability_deadline=stability_deadline,

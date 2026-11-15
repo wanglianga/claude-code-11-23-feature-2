@@ -64,6 +64,9 @@ class ChannelIn(BaseModel):
     name: str
     parent_code: str | None = None
     level: int = 1
+    normal_loss_min_ratio: float = Field(default=0.005, ge=0)
+    normal_loss_max_ratio: float = Field(default=0.03, ge=0)
+    travel_minutes: int = Field(default=60, ge=0)
 
 
 class MeterPointIn(BaseModel):
@@ -71,6 +74,7 @@ class MeterPointIn(BaseModel):
     name: str
     channel_code: str
     point_role: str = Field(pattern="^(head|branch|field|transfer)$")
+    accuracy_ratio: float = Field(default=0.02, gt=0)
 
 
 class PlotIn(BaseModel):
@@ -125,6 +129,44 @@ class AdjudicationIn(BaseModel):
 class ReconciliationResolveIn(BaseModel):
     resolution: str
     operator: str = "admin"
+
+
+# ---------------- 异常损耗诊断 ----------------
+class DiagnosisRunIn(BaseModel):
+    channel_code: str
+    window_start: datetime
+    window_end: datetime
+    observation_cutoff: datetime
+    trigger: str = "manual"
+    slot_minutes: int = Field(default=60, gt=0)
+    note: str = ""
+
+
+class RetestObservation(BaseModel):
+    device_id: str
+    observed_value: float                 # 便携设备实测真值流量 m3/h
+    meter_reading: float | None = None    # 观测时刻该表 concurrent 读数流量（缺省取窗口均值）
+    observed_at: datetime | None = None
+
+
+class RetestReportIn(BaseModel):
+    observations: list[RetestObservation]
+    operator: str = "站长"
+    equipment: str = ""
+    note: str = ""
+
+
+class CorrectionProposeIn(BaseModel):
+    operator: str = "站长"
+
+
+class CorrectionApproveIn(BaseModel):
+    operator: str = "admin"
+
+
+class CorrectionRejectIn(BaseModel):
+    operator: str = "admin"
+    reason: str = ""
 
 
 # ---------------- 通用输出 ----------------

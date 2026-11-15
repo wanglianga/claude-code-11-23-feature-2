@@ -116,3 +116,96 @@ def test_full_api_flow():
     # 版本链可回放
     versions = client.get(f"/api/metrics/{metric_id}/versions").json()
     assert len(versions) >= 1
+
+
+def test_diagnosis_api_flow():
+    """诊断 API：运行 -> 假设并列 -> 复测建议 -> 回报 -> 校正提出/批准。"""
+    _reset()
+    client.post("/api/contracts", json={
+        "code": "CT-CUM", "name": "累计契约", "source_kind": "device",
+        "reading_type": "cumulative", "unit": "m3",
+        "device_id_pattern": "D-.*", "collection_interval_sec": 3600,
+        "payload_schema": {"reading": {"required": True}},
+        "source_version": "v1", "active_from": "2026-11-11T00:00:00+00:00"})
+    client.post("/api/master/channels", json={
+        "code": "WEST", "name": "西干渠", "level": 1,
+        "normal_loss_min_ratio": 0.005, "normal_loss_max_ratio": 0.03,
+        "travel_minutes": 60})
+    client.post("/api/master/channels", json={
+        "code": "W1", "name": "西一", "level": 2, "parent_code": "WEST",
+        "travel_minutes": 60})
+    client.post("/api/master/channels", json={
+        "code": "W2", "name": "西二", "level": 2, "parent_code": "WEST",
+        "travel_minutes": 60})
+    client.post("/api/master/meter-points", json={
+        "code": "MP-WH", "name": "渠首", "channel_code": "WEST",
+        "point_role": "head", "accuracy_ratio": 0.02})
+    client.post("/api/master/meter-points", json={
+        "code": "MP-W1", "name": "支一", "channel_code": "W1",
+        "point_role": "branch", "accuracy_ratio": 0.02})
+    client.post("/api/master/meter-points", json={
+        "code": "MP-W2", "name": "支二", "channel_code": "W2",
+        "point_role": "branch", "accuracy_ratio": 0.02})
+    client.post("/api/master/mapping/publish", params={"note": "init"})
+    for dev, mp in [("D-WH-01", "MP-WH"), ("D-W1-01", "MP-W1"), ("D-W2-01", "MP-W2")]:
+        client.post("/api/master/device-mappings", json={
+            "device_id": dev, "meter_point_code": mp,
+            "effective_from": "2026-11-11T00:00:00+00:00"})
+
+    # 渠段渗漏场景读数
+    series = {
+        "D-WH-01": [1000, 1225, 1450, 1562, 1674, 1786, 1898],
+        "D-W1-01": [500, 590, 680, 770, 860, 950, 1040],
+        "D-W2-01": [2000, 2100, 2200, 2300, 2300, 2300, 2300],
+    }
+    for dev, readings in series.items():
+        for h, r in enumerate(readings):
+            resp = client.post("/api/ingestion/raw", json={
+                "message_uid": f"{dev}-{h}", "contract_code": "CT-CUM",
+                "device_id": dev, "payload": {"reading": r, "unit": "m3"},
+                "event_time": f"2026-11-11T0{h}:00:00+00:00",
+                "received_at": f"2026-11-11T0{h}:05:00+00:00",
+                "source_version": "v1"})
+            assert resp.status_code == 201
+
+    # 运行诊断
+    r = client.post("/api/diagnosis/run", json={
+        "channel_code": "WEST",
+        "window_start": "2026-11-11T00:00:00+00:00",
+        "window_end": "2026-11-11T06:00:00+00:00",
+        "observation_cutoff": "2026-11-11T08:00:00+00:00"})
+    assert r.status_code == 201, r.text
+    run_id = r.json()["id"]
+    assert r.json()["unexplained_residual"] > 0
+
+    # 详情：候选假设并列（不独断）
+    detail = client.get(f"/api/diagnosis/runs/{run_id}").json()
+    cands = [h for h in detail["hypotheses"] if h["is_candidate"]]
+    assert len(cands) >= 3
+    kinds = {h["hypothesis_kind"] for h in cands}
+    assert "segment_loss" in kinds and "meter_offset" in kinds
+
+    # 复测建议：按区分能力排序且非空
+    plans = client.get(f"/api/diagnosis/runs/{run_id}/retests").json()
+    proposed = [p for p in plans if p["status"] == "proposed"]
+    assert proposed and all(p["discriminating_score"] > 0 for p in proposed)
+    assert proposed[0]["equipment"]
+
+    # 现场回报：候选集合真正缩小
+    plan_id = proposed[0]["id"]
+    r = client.post(f"/api/diagnosis/retests/{plan_id}/report", json={
+        "observations": [
+            {"device_id": "D-WH-01", "observed_value": 224.5, "meter_reading": 225.0},
+            {"device_id": "D-W1-01", "observed_value": 90.8, "meter_reading": 90.0},
+        ], "operator": "站长"})
+    assert r.status_code == 201, r.text
+    assert len(r.json()["candidates_after"]) < len(r.json()["candidates_before"])
+    assert len(r.json()["candidates_after"]) == 1
+
+    # 渗漏假设不可转校正；校正列表为空
+    seg = next(h for h in client.get(f"/api/diagnosis/runs/{run_id}").json()["hypotheses"]
+               if h["hypothesis_kind"] == "segment_loss")
+    r = client.post(f"/api/diagnosis/hypotheses/{seg['id']}/propose-correction",
+                    json={"operator": "站长"})
+    assert r.status_code == 409
+    assert client.get("/api/diagnosis/corrections").json() == []

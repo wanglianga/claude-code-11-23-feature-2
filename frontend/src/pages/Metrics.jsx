@@ -56,7 +56,7 @@ export default function Metrics() {
               <thead><tr>
                 <th>日期</th><th>粒度</th><th>对象</th><th>批次</th>
                 <th className="num">计划水量</th><th className="num">确认实灌</th>
-                <th className="num">待核实</th><th>损耗区间(m³)</th>
+                <th className="num">待核实</th><th className="num">校正调整</th><th>损耗区间(m³)</th>
                 <th className="num">缺测率</th><th className="num">完成率</th>
                 <th className="num">超配风险</th><th>状态</th><th>操作</th>
               </tr></thead>
@@ -71,6 +71,9 @@ export default function Metrics() {
                     <td className="num" style={{ color: "var(--ok)", fontWeight: 700 }}>{fmt(x.confirmed_volume)}</td>
                     <td className="num" style={{ color: x.pending_volume ? "var(--warn)" : undefined }}>
                       {fmt(x.pending_volume)}</td>
+                    <td className="num" style={{ color: x.correction_volume ? "var(--info)" : undefined }}
+                      title="已批准校正调整量（追加式调整事实，与确认实灌分列）">
+                      {x.correction_volume ? fmt(x.correction_volume) : "—"}</td>
                     <td className="num mono">
                       {x.loss_lower === null ? <span className="muted">冻结/不适用</span>
                         : `[${fmt(x.loss_lower)}, ${fmt(x.loss_upper)}]`}

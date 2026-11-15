@@ -11,6 +11,7 @@ import Quality from "./pages/Quality";
 import Metrics from "./pages/Metrics";
 import Lineage from "./pages/Lineage";
 import Reconciliation from "./pages/Reconciliation";
+import Diagnosis from "./pages/Diagnosis";
 
 const NAV = [
   { to: "/", label: "治理总览", ico: "▦", end: true },
@@ -18,6 +19,7 @@ const NAV = [
   { to: "/facts", label: "供水事实账", ico: "≣" },
   { to: "/quality", label: "质量事件与裁定", ico: "⚠" },
   { to: "/reconciliation", label: "对账与重算", ico: "⇄" },
+  { to: "/diagnosis", label: "异常损耗诊断", ico: "⚕" },
   { to: "/staging", label: "接入暂存区", ico: "⛁" },
   { to: "/contracts", label: "数据契约", ico: "§" },
   { to: "/master", label: "主数据与映射", ico: "⌘" },
@@ -60,6 +62,7 @@ function Shell() {
           <Route path="/facts" element={<Facts />} />
           <Route path="/quality" element={<Quality />} />
           <Route path="/reconciliation" element={<Reconciliation />} />
+          <Route path="/diagnosis" element={<Diagnosis />} />
           <Route path="/staging" element={<Staging />} />
           <Route path="/contracts" element={<Contracts />} />
           <Route path="/master" element={<Master />} />

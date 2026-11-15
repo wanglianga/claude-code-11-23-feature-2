@@ -147,6 +147,37 @@ def build_lineage(db: Session, metric_version_id: int) -> dict:
                          if adj.decided_at else None})
             edges.append({"source": adj_n, "target": fid_n, "label": "裁定结果"})
 
+        # 校正调整事实 -> 校正参数 -> 诊断假设 -> 诊断运行
+        if f.correction_id:
+            from ..models import CorrectionParam, DiagnosticHypothesis, DiagnosticRun
+            corr = db.get(CorrectionParam, f.correction_id)
+            if corr:
+                cid_n = add("correction", corr.id,
+                            f"校正参数 {corr.kind}@{corr.device_id} [{corr.status}]",
+                            {"correction_uid": corr.correction_uid,
+                             "params": corr.params,
+                             "affected_intervals": corr.affected_intervals,
+                             "proposed_by": corr.proposed_by,
+                             "approved_by": corr.approved_by})
+                edges.append({"source": cid_n, "target": fid_n, "label": "批准校正"})
+                hyp = db.get(DiagnosticHypothesis, corr.hypothesis_id)
+                if hyp:
+                    hid_n = add("hypothesis", hyp.id,
+                                f"假设 {hyp.hypothesis_kind}@{hyp.target}",
+                                {"params": hyp.params, "status": hyp.status,
+                                 "explained": hyp.explained,
+                                 "unexplained": hyp.unexplained})
+                    edges.append({"source": hid_n, "target": cid_n, "label": "诊断依据"})
+                    run = db.get(DiagnosticRun, hyp.run_id)
+                    if run:
+                        rid_n = add("diagnosis", run.id,
+                                    f"诊断 {run.channel_code} "
+                                    f"{run.window_start.date()} [{run.status}]",
+                                    {"run_uid": run.run_uid,
+                                     "observation_cutoff": run.observation_cutoff.isoformat(),
+                                     "unexplained_residual": run.unexplained_residual})
+                        edges.append({"source": rid_n, "target": hid_n, "label": "试算"})
+
     # 质量事件与对账
     for q in db.scalars(select(QualityEvent)).all():
         if set(q.related_fact_ids or []) & set(mv.input_fact_ids):

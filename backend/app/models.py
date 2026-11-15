@@ -40,6 +40,29 @@ METRIC_TENTATIVE = "tentative"
 METRIC_STABLE = "stable"
 METRIC_FROZEN = "frozen"
 
+# ---- 异常损耗诊断 ----
+FACT_ADJUSTMENT = "adjustment"        # 校正调整事实（批准后的校正参数生成，不改原读数）
+
+HYP_METER_OFFSET = "meter_offset"     # 仪表固定偏移
+HYP_METER_GAIN = "meter_gain"         # 仪表倍率异常
+HYP_SEGMENT_LOSS = "segment_loss"     # 渠段额外损耗（真实渗漏等）
+HYP_CLOCK_SKEW = "clock_skew"         # 设备时钟偏差
+
+HYP_CANDIDATE = "candidate"           # 候选（完全相容，未被排除）
+HYP_SUPPORTED = "supported"           # 复测观测支持
+HYP_REFUTED = "refuted"               # 复测观测排除
+HYP_ADOPTED = "adopted"               # 已采纳（转化为校正参数/工程处置）
+
+RUN_OPEN = "open"                     # 候选集合未收敛
+RUN_CONVERGED = "converged"           # 复测后收敛到唯一候选
+RUN_INCONCLUSIVE = "inconclusive"     # 复测后仍多候选，证据不足
+RUN_ADOPTED = "adopted"               # 已有假设被采纳（不被后续新分析覆盖）
+
+CORR_PENDING = "pending_approval"     # 待批准（设备资料变更时失效）
+CORR_APPROVED = "approved"
+CORR_REJECTED = "rejected"
+CORR_INVALIDATED = "invalidated"
+
 
 class DataContract(Base):
     __tablename__ = "data_contracts"
@@ -101,6 +124,10 @@ class Channel(Base):
     name: Mapped[str] = mapped_column(String(128))
     parent_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     level: Mapped[int] = mapped_column(Integer, default=1)        # 1=干渠/渠首 2=支渠
+    # ---- 诊断参数：渠段正常损耗区间与输送时长（异常损耗诊断引擎输入） ----
+    normal_loss_min_ratio: Mapped[float] = mapped_column(Float, default=0.005)  # 正常损耗率下限
+    normal_loss_max_ratio: Mapped[float] = mapped_column(Float, default=0.03)   # 正常损耗率上限
+    travel_minutes: Mapped[int] = mapped_column(Integer, default=60)  # 上游到本渠道进口输送时长
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -111,6 +138,7 @@ class MeterPoint(Base):
     name: Mapped[str] = mapped_column(String(128))
     channel_code: Mapped[str] = mapped_column(String(64), index=True)
     point_role: Mapped[str] = mapped_column(String(24))  # head 渠首 / branch 支渠 / field 田间 / transfer 交接
+    accuracy_ratio: Mapped[float] = mapped_column(Float, default=0.02)  # 仪表精度（相对误差）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -217,6 +245,7 @@ class SupplyFact(Base):
     source_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     meter_change_id: Mapped[int | None] = mapped_column(ForeignKey("meter_changes.id"), nullable=True)
     adjudication_id: Mapped[int | None] = mapped_column(ForeignKey("adjudications.id"), nullable=True)
+    correction_id: Mapped[int | None] = mapped_column(ForeignKey("correction_params.id"), nullable=True)
     supersedes_fact_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # 一个新事实可能取代多条旧事实（如证据冲突的双候选），用列表完整记录取代链
     replaces_fact_ids: Mapped[list] = mapped_column(JSONB, default=list)
@@ -307,6 +336,7 @@ class MetricVersion(Base):
     planned_volume: Mapped[float] = mapped_column(Float, default=0.0)
     confirmed_volume: Mapped[float] = mapped_column(Float, default=0.0)
     pending_volume: Mapped[float] = mapped_column(Float, default=0.0)
+    correction_volume: Mapped[float] = mapped_column(Float, default=0.0)  # 已批准校正调整量（单列）
     loss_lower: Mapped[float | None] = mapped_column(Float, nullable=True)
     loss_upper: Mapped[float | None] = mapped_column(Float, nullable=True)
     missing_rate: Mapped[float] = mapped_column(Float, default=0.0)
@@ -320,3 +350,125 @@ class MetricVersion(Base):
     input_fact_ids: Mapped[list] = mapped_column(JSONB, default=list)
     recompute_run_id: Mapped[int | None] = mapped_column(ForeignKey("recompute_runs.id"), nullable=True)
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------- 异常损耗诊断
+class DiagnosticRun(Base):
+    """一次异常损耗诊断分析（快照式）。
+
+    观测截止点 observation_cutoff 在创建时固定：只使用 cutoff 之前接收的读数；
+    截止后到达的迟到数据形成新的诊断运行，不覆盖本运行（已采用诊断更不被覆盖）。
+    """
+    __tablename__ = "diagnostic_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_uid: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    channel_code: Mapped[str] = mapped_column(String(64), index=True)   # 被诊断的汇合（父）渠道
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observation_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    trigger: Mapped[str] = mapped_column(String(24), default="manual")  # manual/late_data/retest_followup
+    status: Mapped[str] = mapped_column(String(16), default=RUN_OPEN, index=True)
+    # open / converged / inconclusive / adopted
+    upstream_total: Mapped[float] = mapped_column(Float, default=0.0)
+    downstream_total: Mapped[float] = mapped_column(Float, default=0.0)
+    residual_total: Mapped[float] = mapped_column(Float, default=0.0)        # 上游-下游 总残差
+    unexplained_residual: Mapped[float] = mapped_column(Float, default=0.0)  # 容差外残差合计
+    slot_minutes: Mapped[int] = mapped_column(Integer, default=60)           # 对齐分桶粒度
+    inputs_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 快照：损耗区间/仪表精度/输送时长/逐时段残差明细
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class DiagnosticHypothesis(Base):
+    """候选假设试算结果：固定偏移/倍率异常/渠段额外损耗/时钟偏差。
+
+    多种解释同样成立时并列保存，绝不凭最小残差自动判定故障；
+    explained/unexplained 分别记录该假设能解释的观测与仍不相容部分。
+    """
+    __tablename__ = "diagnostic_hypotheses"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_runs.id"), index=True)
+    hypothesis_kind: Mapped[str] = mapped_column(String(24), index=True)
+    # meter_offset / meter_gain / segment_loss / clock_skew
+    target_kind: Mapped[str] = mapped_column(String(16))      # device / segment
+    target: Mapped[str] = mapped_column(String(64), index=True)  # device_id 或 channel_code
+    params: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # {offset_m3_per_slot} / {gain_ratio} / {extra_loss_m3_per_slot} / {shift_minutes}
+    explained: Mapped[list] = mapped_column(JSONB, default=list)    # 应用后转为相容的时段
+    unexplained: Mapped[list] = mapped_column(JSONB, default=list)  # 应用后仍超差的时段
+    residual_after: Mapped[float] = mapped_column(Float, default=0.0)
+    is_candidate: Mapped[bool] = mapped_column(Boolean, default=False)  # 完全相容=候选
+    status: Mapped[str] = mapped_column(String(16), default=HYP_CANDIDATE, index=True)
+    # candidate / supported / refuted / adopted
+    refute_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    run: Mapped["DiagnosticRun"] = relationship()
+
+
+class RetestPlan(Base):
+    """复测建议：在某位置补一段读数可区分多少候选假设。"""
+    __tablename__ = "retest_plans"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_uid: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_runs.id"), index=True)
+    position_kind: Mapped[str] = mapped_column(String(16))    # meter_point / segment
+    position: Mapped[str] = mapped_column(String(64))         # 计量点/渠道 code
+    device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    method: Mapped[str] = mapped_column(String(32))           # portable_flow_meter / clock_check
+    equipment: Mapped[str] = mapped_column(String(128))       # 所需设备
+    suggested_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    suggested_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observation_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # 固定观测截止点
+    discriminates: Mapped[list] = mapped_column(JSONB, default=list)
+    # [{hypothesis_id, rival_id, reason}] 该位置可区分的假设对
+    discriminating_score: Mapped[int] = mapped_column(Integer, default=0)  # 可区分假设对数
+    status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)
+    # proposed / reported / closed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class RetestReport(Base):
+    """现场回报：一次复测观测。回报后重算，未支持的假设被排除。"""
+    __tablename__ = "retest_reports"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("retest_plans.id"), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_runs.id"), index=True)
+    observed_value: Mapped[float] = mapped_column(Float)      # 实测真值（m3/h）
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    equipment: Mapped[str] = mapped_column(String(128), default="")
+    operator: Mapped[str] = mapped_column(String(64), default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    candidates_before: Mapped[list] = mapped_column(JSONB, default=list)  # 回报前候选假设 id
+    candidates_after: Mapped[list] = mapped_column(JSONB, default=list)   # 回报后候选假设 id
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CorrectionParam(Base):
+    """校正参数：诊断估计转化为核算调整的唯一入口。
+
+    必须批准才能作用于核算；批准时按 affected_intervals 生成追加式
+    adjustment 事实（不直接改原读数）；设备资料变更使待批准校正失效。
+    """
+    __tablename__ = "correction_params"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    correction_uid: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    hypothesis_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_hypotheses.id"), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_runs.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(24))             # meter_offset / meter_gain
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    meter_point_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    params: Mapped[dict] = mapped_column(JSONB, default=dict)
+    affected_intervals: Mapped[list] = mapped_column(JSONB, default=list)
+    # [{interval_start, interval_end, delta_m3}] 全部受影响区间及差额
+    status: Mapped[str] = mapped_column(String(20), default=CORR_PENDING, index=True)
+    # pending_approval / approved / rejected / invalidated
+    proposed_by: Mapped[str] = mapped_column(String(64), default="")
+    approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidate_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    hypothesis: Mapped["DiagnosticHypothesis"] = relationship()
